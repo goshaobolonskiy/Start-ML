@@ -281,27 +281,37 @@ def detection_dbscan(X_train, eps=0.5, min_samples=5, auto_eps=True, scale_data=
 # Обработка численных выбросов
 
 # Удаление численных выбросов (только для тренировочных данных)
-def deleting_outliers(X_train, y_train, all_outliers_mask):
-    # Удаляем все строки с выбросами из X_train и y_train ОДНОВРЕМЕННО
+def deleting_outliers_train(X_train, all_outliers_mask):
     X_train_clean = X_train[~all_outliers_mask].copy()
-    y_train_clean = y_train[~all_outliers_mask].copy()
 
-    return X_train_clean, y_train_clean
+    return X_train_clean
 
 
-# Каппинг - предпочтительно только для тестовых данных
-def capping_outliers(X_train, X_test, lower_bounds, upper_bounds):
+# Каппинг - только для тестовых данных
+def capping_outliers_test(X_train, X_test, lower_bounds, upper_bounds, exclude_columns=None):
+    """
+    Capping с возможностью исключения определенных колонок
+    """
+    if exclude_columns is None:
+        exclude_columns = []
+
     X_test_capped = X_test.copy()
 
-    # Берем пересечение численных столбцов (на случай, если в X_test буду другие численные колонки
+    # Находим общие числовые колонки, исключая указанные
     numeric_cols = X_train.select_dtypes(include=['float', 'int']).columns.intersection(
         X_test.select_dtypes(include=['float', 'int']).columns
     )
+
+    # Удаляем исключенные колонки
+    numeric_cols = [col for col in numeric_cols if col not in exclude_columns]
+
     for col in numeric_cols:
-        X_test_capped[col] = X_test[col].clip(  # Заменяем экстримальные значения на границу
-            lower=lower_bounds[col],
-            upper=upper_bounds[col]
-        )
+        # Проверяем, что границы существуют для этой колонки
+        if col in lower_bounds and col in upper_bounds:
+            X_test_capped[col] = X_test[col].clip(
+                lower=lower_bounds[col],
+                upper=upper_bounds[col]
+            )
 
     return X_test_capped
 
@@ -1040,4 +1050,125 @@ def correct_typos(X_train, X_test, correction_dict=None, fuzzy_threshold=0.8,
 
     return X_train_corrected, X_test_corrected, correction_info
 
-# print(correct_typos(X_train, X_test))
+
+# Универсальная функция обработки (объединение 4х) с возможностью выбора
+def process_categorical_outliers(X_train, X_test, strategy='group', detection_info=None, **kwargs):
+    """
+    Универсальная функция обработки категориальных выбросов
+
+    Parameters:
+    -----------
+    X_train, X_test : DataFrame
+    strategy : str
+        'group' - группировка редких категорий
+        'mode' - замена на моду
+        'flag' - создание бинарных признаков
+        'correct' - исправление опечаток
+        'combined' - комбинированная стратегия
+    detection_info : dict
+        Результат detection_categorical_outliers
+    **kwargs : дополнительные параметры для конкретных стратегий
+
+    Returns:
+    --------
+    X_train_processed, X_test_processed : DataFrames
+    processing_info : dict, информация об обработке
+    """
+    # Если detection_info не передан, вычисляем его
+    if detection_info is None and strategy != 'correct':
+        _, detection_info = detection_categorical_outliers(X_train)
+
+    processing_info = {
+        'strategy': strategy,
+        'original_shape': (X_train.shape, X_test.shape)
+    }
+
+    # Применяем выбранную стратегию
+    if strategy == 'group':
+        X_train_processed, X_test_processed, info = group_rare_categories(
+            X_train, X_test, detection_info,
+            threshold=kwargs.get('threshold', 0.01),
+            replacement=kwargs.get('replacement', 'Other')
+        )
+        processing_info['method_info'] = info
+
+    elif strategy == 'mode':
+        X_train_processed, X_test_processed, info = replace_with_mode(
+            X_train, X_test, detection_info
+        )
+        processing_info['method_info'] = info
+
+    elif strategy == 'flag':
+        X_train_processed, X_test_processed, info = add_outlier_flags(
+            X_train, X_test, detection_info,
+            prefix=kwargs.get('prefix', 'outlier_')
+        )
+        processing_info['method_info'] = info
+
+    elif strategy == 'correct':
+        X_train_processed, X_test_processed, info = correct_typos(
+            X_train, X_test,
+            correction_dict=kwargs.get('correction_dict', None),
+            fuzzy_threshold=kwargs.get('fuzzy_threshold', 0.8)
+        )
+        processing_info['method_info'] = info
+
+    elif strategy == 'combined':
+        # Применяем несколько стратегий последовательно
+        X_temp_train = X_train.copy()
+        X_temp_test = X_test.copy()
+        combined_info = {}
+
+        # 1. Исправляем опечатки
+        X_temp_train, X_temp_test, correct_info = correct_typos(
+            X_temp_train, X_temp_test,
+            correction_dict=kwargs.get('correction_dict', None)
+        )
+        combined_info['correction'] = correct_info
+
+        # 2. Обновляем detection_info после исправлений
+        _, updated_detection_info = detection_categorical_outliers(X_temp_train)
+
+        # 3. Группируем редкие категории
+        X_temp_train, X_temp_test, group_info = group_rare_categories(
+            X_temp_train, X_temp_test, updated_detection_info,
+            threshold=kwargs.get('threshold', 0.01)
+        )
+        combined_info['grouping'] = group_info
+
+        # 4. Добавляем флаги (опционально)
+        if kwargs.get('add_flags', False):
+            X_temp_train, X_temp_test, flag_info = add_outlier_flags(
+                X_temp_train, X_temp_test, updated_detection_info
+            )
+            combined_info['flags'] = flag_info
+
+        X_train_processed, X_test_processed = X_temp_train, X_temp_test
+        processing_info['method_info'] = combined_info
+
+    else:
+        raise ValueError(f"Неизвестная стратегия: {strategy}. "
+                         f"Используйте 'group', 'mode', 'flag', 'correct' или 'combined'")
+
+    processing_info['processed_shape'] = (X_train_processed.shape, X_test_processed.shape)
+
+    return X_train_processed, X_test_processed, processing_info
+
+
+# Обрабатываем численные выбросы
+
+# Определяем какие строчки в train у нас выбросы, а так же границы
+mask, lower_bounds, upper_bounds = detection_MAD(X_train)
+# Удаляем строки с выбросами из X_train, чтобы получить чистые данные
+X_train = deleting_outliers_train(X_train, mask)
+# Удаляем соответствующие строки в y_train
+y_train = y_train.loc[~mask]
+
+# Обрабатываем выбросы в X_test
+# Так как работаем с бизнес логикой, наши высокие значения сборов - не выбросы, а очень лояльные клиенты, которых нам надо удерживать
+X_test = capping_outliers_test(X_train, X_test, lower_bounds, upper_bounds,
+                               ["tenure", "MonthlyCharges", "TotalCharges"])
+
+# Отработка категориальных выбросов
+if detection_categorical_outliers(X_train)[0].sum():
+    X_train, X_test, _ = process_categorical_outliers(X_train, X_test, strategy="combined")
