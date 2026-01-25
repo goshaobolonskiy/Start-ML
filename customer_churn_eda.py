@@ -2,8 +2,6 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
 
 # Загрузка данных
 df = pd.read_csv('WA_Fn-UseC_-Telco-Customer-Churn.csv')
@@ -31,23 +29,40 @@ corr_pairs = corr_triu.stack()
 for (f1, f2), value in corr_pairs.sort_values(ascending=False).items():
     print(f"  {f1:15} ↔ {f2:15}: {value:+.4f}")
 
+# Распределение каждой из переменной
+for i in df_test.columns:
+    plt.grid(True, alpha=0.3)
+    # plt.tight_layout()
+    plt.title(f"Распределение {i}")
+    plt.xlabel(f"Значение {i}")
+    plt.ylabel("Количество")
+    plt.hist(df_test[i])
+    plt.show()
+
 # Список категориальных столбцов, которые будем кодировать
 cat = ['gender', 'Partner', 'Dependents', 'PhoneService', 'MultipleLines', 'InternetService',
        'OnlineSecurity', 'OnlineBackup', 'DeviceProtection',
        'TechSupport', 'StreamingTV', 'StreamingMovies', 'Contract', 'PaperlessBilling', 'PaymentMethod', 'Churn']
-
+cat = [column for column in df_test.columns if df_test[column].dtype == 'O']
 # Кодирование каждого категориального значения цифрой
-le = LabelEncoder()
-for i in cat:
-    df_test[f'{i}'] = le.fit_transform(df_test[f'{i}'])
+from sklearn.preprocessing import OneHotEncoder
+
+ohe = OneHotEncoder(drop="if_binary", sparse_output=False)
+
+new_category_columns = ohe.fit_transform(df_test[cat])
+
+df_test = pd.concat([
+    df_test.drop(columns=cat),
+    pd.DataFrame(new_category_columns, columns=ohe.get_feature_names_out())
+], axis=1)
 
 # Вывод только категориальных столбоцов
 # print(df.select_dtypes(include=['category', 'object']).info())
 
 
 # Матрица корреляции с целевой переменной
-corr_with_target = df_test.corr()[["Churn"]]
-corr_with_target = corr_with_target['Churn'].drop('Churn')
+corr_with_target = df_test.corr()[["Churn_Yes"]]
+corr_with_target = corr_with_target['Churn_Yes'].drop('Churn_Yes')
 print('Корреляция с целевой переменной')
 print(corr_with_target)
 # Матрица корреляции
@@ -71,13 +86,3 @@ bars = plt.bar(top_correlations.index, top_correlations.values, color='skyblue',
                alpha=0.7)
 plt.bar_label(bars, fmt='%.3f', padding=3, fontsize=9)
 plt.show()
-
-# Распределение каждой из переменной
-for i in df_test.columns:
-    plt.grid(True, alpha=0.3)
-    # plt.tight_layout()
-    plt.title(f"Распределение {i}")
-    plt.xlabel(f"Значение {i}")
-    plt.ylabel("Количество")
-    plt.hist(df[i])
-    plt.show()
